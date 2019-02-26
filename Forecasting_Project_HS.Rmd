@@ -1,0 +1,850 @@
+---
+title: "Stats 170 Project"
+author: "Lara Vartanian"
+date: "11/24/2018"
+output: 
+  pdf_document: 
+    toc: true 
+    toc_depth: 2 
+    number_sections: true
+    fig_caption: true 
+  subtitle: When are forecasts ahead more accurate? 
+---
+
+\newpage
+
+# Introduction 
+
+The main question we are trying to address in this paper is: When are our forecasts ahead better, i.e., more accurate?
+
+(a) When the only information we use is the historical information of the time series we want to forecast, and nothing else, as when using SARIMA(p,d,q)(P,D,Q) or perhaps SARIMA with garch?
+
+(b) When the variable we want to forecast is the dependent variable in a traditional regression model and we use other information in the form of other variables that play the role of exogenous variables? Such model could also have dummies for seasonals and polynomial trends for trend. The residuals of such a model probably need to be
+modeled as AR or ARIMA model to account for autocorrelation. This is the approach we used when we studied gls to approach regression with autocorrelated residuals.
+
+(c) When we use information in other variables, but the variable we want to forecast is a dependent and independent variable at the same time, and so are the other variables both dependent and independent, as in VAR?
+
+(d) When we average the forecasted values of (a), (b), (c), to obtain a "consensus" forecast.
+
+These questions always arise in practice in a number of sciences, among them economics and meteorology. Nobody would ever use a single model to make a forecast for time t + 1. Almost all areas that predict the future fit several models, and then they average the forecasts obtained for each future time t + 1 from all the models to obtain what
+they called the "consensus" forecast for time t.
+
+# The data we will use to illustrate that dilemma 
+
+In this section, we will describe that data that we will use to answer the question posed in the introduction. The variable that we will want to forecast is housing starts in the United States. Housing starts is considered to be a leading indicator of what might come next in the economy. If housing construction starts to flourish that should be an indication of prosperity to come, some economists think. Other information that will be used for the models that use the other variables is unemployment rate, and unemployment rate for women. The source of the data is FRED (Federal Reserve Economic Data, https://fred.stlouisfed.org). The variables are observed from January 1st
+1959 to August 1st 2018. We will use January 1st 1959 to August 1st 2017 as training data, to fit the model, and then we will forecast from September 1st 2017 to August 1st 2018. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tseries)  # use for garch 
+library(tidyverse)
+library(knitr)
+library(kableExtra)   # for long strings in table kable 
+library(captioner)   # for figures 
+library(forecast)  # for BoxCox 
+library(fGarch)  # for garchFit 
+library(vars)  # for VAR models 
+library(nlme)  # for gls 
+library(dplyr)
+
+figs <- captioner(prefix = "Figure") # sets common prefix for all items of a certain type # figs will hold a list of tags and captions for figures 
+table_nums <- captioner(prefix = "Table") # will hold the same for tables 
+
+#tbls(name = "DescribeData", "Description of Data")
+
+
+
+www <- "http://www.stat.ucla.edu/~jsanchez/data/hwk6data.csv"
+data <- ts(read.csv(www), start = c(1959,1), end = c(2018,8), freq = 12)
+colnames(data) <- c("hs", "uw", "ur")
+
+train = window(data, start = c(1959,1), end = c(2017,8))
+test = window(data, start = c(2017,9), end = c(2018,8))
+
+hs.ts.train = ts(train[,1],start=1959,freq=12)
+uw.ts.train = ts(train[,2],start=1959,freq=12)
+ur.ts.train = ts(train[,3],start=1959,freq=12)
+
+hs.ts.test = ts(test[,1], start = c(2017,9), freq = 12)
+uw.ts.test = ts(test[,2], start = c(2017,9), freq = 12)
+ur.ts.test = ts(test[,3], start = c(2017,9), freq = 12)
+
+Variable.name <- c("HOUSTNSA", "LNU04000002", "UNRATENSA")
+R.name <- colnames(train)
+Description.and.source <- c("Housing Starts: Total new privately owned housing units (in thousands). Monthly. Not seasonally adjusted. This is the variable we want to forecast", "Unemployment rate: Women(percent) Monthly. Not seasonally adjusted", "Civilian Unemployment Rate (percent) Montly. Not seasonally adjusted")
+Training.Set <- c("Jan 1, 1959 : Aug 1, 2017", "Jan 1, 1959 : Aug 1, 2017", "Jan 1, 1959 : Aug 1, 2017")
+Test.Set <- c("Aug 1, 2018 : Sept 1 ,2019", "", "")
+description.table <- cbind(Variable.name,R.name,Description.and.source,Training.Set,Test.Set)
+
+kable(description.table) %>% 
+  kable_styling(full_width = F) %>% 
+  column_spec(1, border_right = T) %>% 
+  column_spec(3, width = "12em")
+```
+
+`r table_nums("DescribeData","Description of Data" )`
+
+
+# Complete data description, unit root test, volatility checking and cointegration
+
+## Decompose the Three Time Series 
+```{r echo=FALSE, fig.height=4, fig.width=4} 
+
+##### Decompose TS 
+decom.additive.hs=decompose(train[,1])
+decom.additive.uw=decompose(train[,2])
+decom.additive.ur=decompose(train[,3])
+
+my_plot.decomposed.ts = function(x, title="", ...) {
+  xx <- x$x
+  if (is.null(xx)) 
+    xx <- with(x, if (type == "additive") 
+      random + trend + seasonal
+      else random * trend * seasonal)
+  plot(cbind(observed = xx, trend = x$trend, seasonal = x$seasonal, random = x$random), 
+       main=title, ...)
+}
+
+
+
+my_plot.decomposed.ts(decom.additive.hs,"Decomposition of HS")
+my_plot.decomposed.ts(decom.additive.uw,"Decomposition of UW")
+my_plot.decomposed.ts(decom.additive.ur,"Decomposition of UR")
+#figs(name = "Decomposition", "Decomposition of the three Time Series")
+#description_cap <- figs("Description")
+
+# figs("Decomposition")
+# figs("Decomposition", display = "cite")
+# figs("Decomposition", display = "num")
+```
+
+`r figs("Description","Decomposition of the three Time Series" )`
+
+From looking at the decomposition tables in `figs("Decomposition", display = num)`, there isn't a clearly defined one trend for all three time series; there have been periods of downward trend then upward then downward. There seems to be a seasonal component in all three time series. 
+
+
+## Seasonal Box Plots of the Three Time Series 
+
+```{r echo=FALSE, fig.height=4, fig.width=4}
+
+##### Seasonal Box Plots 
+#cycle(train)   # see indicators for each month
+boxplot(train[,1]~cycle(train[,1]), main = "Seasonal Box Plot of HS")  # seasonality with housing starts greater in months of may, june, july
+boxplot(train[,2]~cycle(train[,2]), main = "Seasonal Box Plot of UW")  # not as much variation in seasonality but slightly higher in month of june 
+boxplot(train[,3]~cycle(train[,3]), main = "Seasonal Box Plot of UR")  # not as much as variation in seasonality 
+
+```
+
+`r figs("Seasonal_Plot","Seasonal Box Plots of the three Time Series" )`
+
+In `r figs("Seasonal_Plot", display = "cite")`, we get a closer look at the seasonal plots where we can see the seasonal variation in housing starts. The average housing start seems to be higher in April, May, June, July. Unemployment rate of women also tends to be higher during June, July. There doesn't seem to be as much fluctuation in the unemployment rate for all civilians. 
+
+
+## Time Plots of the Three Time Series 
+
+```{r, echo=FALSE}
+##### Time Series Plots 
+plot.ts(cbind(hs.ts.train, uw.ts.train, ur.ts.train), main = "Time Plots")
+```
+
+`r figs("TimePlots","Time Plots of the three Time Series")`
+
+
+The time plots in `r figs("TimePlots",display = "cite")` show some non-stationarity in the series.
+
+
+## Unit Root tests 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+##### Unit Root tests to see if variables have unit roots 
+
+adf.test(hs.ts.train) # p-value of 0.2943 so we fail to reject the null at the 5% significance level. Process is random walk. 
+adf.test(uw.ts.train) # p-value of 0.119 so we fail to reject the null at the 5% significance level. Process is random walk.
+adf.test(ur.ts.train)
+
+p.values <- c(0.2943,0.119,0.09635)
+unit.root.table <- cbind(R.name, p.values)
+unit.root.table %>% kable()
+```
+
+`r table_nums("UnitRoot","Unit Root Tests")`
+
+
+We do a unit root test to see if variables have unit roots. If the variables have unit roots, it implies that the process is a random walk. We do this before vector autoregression to guarantee that we are not just getting a spurious regression when trends are stochastic. If process is random walk, the null hypothesis of a unit root will not be rejected. The shortcoming of this Dickey Fuller test is that it has low power so in the next section, we will take the ACF of the differenced data to confirm if the series is a random walk. 
+
+$H_o: \alpha = 1$
+
+$H_a: \alpha \neq 1$
+
+The p-value of hs is 0.2943 so we fail to reject the null at the 5% significance level; this tells us that the process is a random walk.
+
+The p-value of uw is 0.119 so we fail to reject the null at the 5% significance level; this tells us that the process is a random walk.
+
+The p-value of ur is 0.09635 so we fail to reject the null at the 5% significance level; this tells us that the process is a random walk.
+
+## ACF of Differenced Data 
+
+```{r, echo = FALSE}
+par(mfrow = c(1,3))
+acf(diff(hs.ts.train))
+acf(diff(uw.ts.train))
+acf(diff(ur.ts.train))
+```
+
+`r figs("ACFofDiff","ACF of Differenced Data" )`
+
+
+The acf of the differenced data does not show white noise for the 3 time series which contradicts the augmented Dickey-Fuller test where the process of three time series were proven to be random walks; it is important to note that the Dickey-Fuller test is known to have little power. 
+
+We should consider differencing the data to make the series a random walk. 
+
+
+## Cointegration Test 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all', warning=FALSE}
+# Cointegration test 
+
+po.test(cbind(hs.ts.train, uw.ts.train, ur.ts.train))  # 0.01 
+
+
+po.test 
+cointeg.table <- table(p.value = 0.01)
+cointeg.table %>% kable()
+```
+
+`r table_nums("CointegrationTest","Cointegration Test")`
+
+We next run a cointegration test to see if the variables are cointegrated, that is, if the different series are really related and have a common series. Note that the po test is only meaningful if unit root series. 
+
+Two series can be tested for cointegration using the Phillips-Ouliaris test implemented in the po.test in the tseries library. 
+
+$H_o$: X,Y are not conintegrated, share common stochastic trend 
+
+$H_a$: X,Y are cointegrated [common series, really related]
+
+The p-value is 0.01 so we reject the null at the 5% significance level and conclude that the three time series are cointegrated. 
+
+
+## Volatility Checking
+
+### Correlograms of mean adjusted 
+
+```{r, echo = FALSE, fig.height=4}
+##### Volatility checking to see if the data is volatile
+# Correlograms of mean adjusted 
+par(mfrow = c(1,3))
+acf(hs.ts.train - mean(hs.ts.train), main = "ACF of HS")
+acf(uw.ts.train - mean(uw.ts.train), main = "ACF of UW")
+acf(ur.ts.train - mean(ur.ts.train), main = "ACF of UR")
+```
+
+`r figs("CorlMeanAdjusted","Correlograms of Mean Adjusted")`
+
+In `r figs("CorlMeanAdjusted", display = "cite")`, we check the correlograms of the mean adjusted series. We see that each of the three series all have high autocorrelations. 
+
+
+### Correlograms of mean squared adjusted
+
+```{r, echo = FALSE, fig.height=4}
+par(mfrow = c(1,3))
+# Correlograms of mean squared adjusted
+acf((hs.ts.train - mean(hs.ts.train))^2, main = "ACF of squared mean adjusted HS")
+acf((uw.ts.train - mean(uw.ts.train))^2, main = "ACF of squared mean adjusted UW")
+acf((ur.ts.train - mean(ur.ts.train))^2, main = "ACF of squared mean adjusted UR")
+```
+
+`r figs("CorMeanSqrAdjusted","Correlograms of Mean Squared Adjusted" )`
+
+We then take check the correlograms of the mean squared adjusted in `r figs("CorMeanSqrAdjusted", display = "cite")`. 
+
+
+## Data Transformation  
+
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all', fig.width=4, fig.height=4}
+
+## Note: APPLY TO TEST DATA AS WELL!!!!!!!!!!
+#library(forecast)  # for boxcox transformation 
+lambda_hs <- BoxCox.lambda(hs.ts.train, method = c("guerrero"))
+lambda_hs  # 0.0818635  --> log transformation 
+
+lambda_uw <- BoxCox.lambda(uw.ts.train, method = c("guerrero"))
+lambda_uw  # 0.3283108  --> cube root transformation 
+  
+lambda_ur <- BoxCox.lambda(ur.ts.train, method = c("guerrero"))
+lambda_ur  # 0.0338673  --> log transformation 
+
+
+## Check which transformation stabilizes the variance 
+
+log.train.hs = log(hs.ts.train)
+cube_root.train.uw = (uw.ts.train)^(1/3)
+log.train.ur = log(ur.ts.train)
+
+transformed_train = cbind(log.train.hs, cube_root.train.uw, log.train.ur)
+
+transformed_test.hs = log(test[,1])
+
+plot(cbind(hs.ts.train,log.train.hs), main="HS: Raw data (top) and log transform")
+
+plot(cbind(uw.ts.train,cube_root.train.uw), main="UW: Raw data (top) and Cube Root transform")
+
+plot(cbind(ur.ts.train,log.train.ur), main="UR: Raw data (top) and log transform")
+
+
+
+acf(log.train.hs,main="ACF of log transformed hs", lag=50)
+
+acf(cube_root.train.uw,main="ACF of cube root transformed uw", lag=50)
+
+acf(log.train.ur, main="ACF of log transformed ur", lag=50)
+
+
+##Decide which transformation stabilizes the variance best
+
+## look at the acf of the transformation you chose and determine what to do next based on your ACF.
+
+# The square root transformation is better because there is constant variance
+
+
+# Now confirm: data is NOT stationary: because ACF has many significant 
+# autocorrelations (it dies down very slowly) and also from the time plot we can tell. 
+
+# So we difference, try regular differencing first. Then seasonal only. Then both.
+
+
+## Part C [FOR STATIONARY YOU ONLY NEED TO LOOK AT ACF]
+
+# We will continue with the log transformation for illustration
+
+# Check how much differencing should be done
+```
+
+
+
+## ACF and CCF of the Three Transformed Variables - No Differencing 
+
+```{r, echo=FALSE}
+acf(cbind(log.train.hs, cube_root.train.uw, log.train.ur))
+```
+
+
+`r figs("ACF_CCF.Transf.NoDiff","ACF and CCF of Transformed Data - No Differencing" )`
+
+By looking at the ACF of each of the time series, we see that the series are not stationary because there are many significant autocorrelations which die down very slowly; the next step would be to try regular differencing, seasonal only differencing, and seasonal of regular differencing. 
+
+
+### ACF and CCF of Differenced Three Variables 
+
+```{r, echo = FALSE}
+transf.train.diff <- diff(transformed_train, lag = 1, differences = 1)
+acf(transf.train.diff)
+```
+
+`r figs("ACF_CCF.Transf.RDiff","ACF and CCF of Transformed Data - Regular Differencing" )`
+
+There still seems to be signs of non stationarity in the ACFs of the time series so we will try seasonal only differencing next. 
+
+
+### ACF and CCF of Seasonally Differenced Transformed Three Variables 
+
+```{r, echo = FALSE}
+transf.seas.dif <- diff(transformed_train, differences = 1, lag = 12)
+acf(transf.seas.dif)
+```
+
+`r figs("ACF_CCF.Transf.SDiff","ACF and CCF of Transformed Data - Seasonal Differencing Only" )`
+
+The seasonal only differencing seems to not work so we will try the seasonal of regular differencing next. 
+
+
+### ACF and CCF of Seasonal of Regular Differencing of the three Variables
+
+```{r, echo = FALSE}
+transf.seas.of.diff <- diff(transf.train.diff, lag = 12)
+acf(transf.seas.of.diff)
+```
+
+`r figs("ACF_CCF.Transf.SRDiff","ACF and CCF of Transformed Data - Seasonal of Regular Differencing" )`
+
+The Seasonal of Regular Differencing in `r figs("ACF_CCF_SRDiff",display = "cite")` seems to be the most satisfactory out of the previous differencings, as this one renders the series the most stationary. So seasonal of regular differencing will be used for our analysis. 
+
+
+# SARIMA(p,d,q)(P,D,Q) perhaps with garch model? 
+
+We will fit a SARIMA model to the log transformed housing starts variable only. 
+
+```{r, echo = FALSE}
+transform.diff.hs = diff(log.train.hs, diff = 1, lag = 1)
+transform.seas.of.diff.hs = diff(transform.diff.hs, diff = 1, lag = 12)
+
+par(mfrow = c(1,2))
+acf(transform.seas.of.diff.hs)
+pacf(transform.seas.of.diff.hs)
+
+```
+
+
+`r figs("ACF.of.Log.HS","ACF of Log HS - Seasonal of Regular Differencing" )`
+
+We look at the ACF and PACF to determine our SARIMA model.
+
+Regular part: The ACF on the left side in `r figs("ACF.of.Log.HS",display = "cite" )` shows the first autocorrelation, $r_1$, as significant and has a strict cutoff after which suggests MA(1) process. The PACF on the right has $r_1$ significant which suggests dies down which suggests an AR(1) process. 
+
+Seasonal part: The ACF shows $r_{10}$ , $r_{11}$ , $r_{12}$ all statistically significant with a cutoff after suggesting an MA(2) process. The PACF on the right also has the same autocorrelations significant suggesting an AR(2).  
+
+
+$SARIMA(1,1,1)(2,1,2)_{12}$
+
+This can be written in back shift notation as the following: 
+$(1 - (-0.2186 + 0.0332)B^{12} (1 + 0.1218 B) (1 - B^{12}) (1 - B) x_t = (1 + (-0.6079 -0.2641)B^{12}(1 - 0.2455 )w_t$
+
+$(1 + 0.1854 B^{12}) (1 + 0.1218B)(1-B^{12})(1-B)x_t = (1-0.872B^{12})(1-0.245)w_t$
+
+### Check Goodness of Fit by checking the correlogram of the residuals 
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+sarima.model = arima(log.train.hs, order = c(1,1,1), 
+                seas = list(order = c(2,1,2),12))
+
+sarima.model
+t(confint(sarima.model))
+
+sarima.model.2 = arima(log.train.hs, order = c(0,1,1), 
+                seas = list(order = c(2,1,2),12))
+sarima.model.2
+
+sarima.model.3 = arima(log.train.hs, order = c(2,1,0), 
+                seas = list(order = c(2,0,2),12)) 
+sarima.model.3
+
+
+# 2 1 0    2 0 2
+
+AIC(sarima.model)    # -1339.496 
+AIC(sarima.model.2)  # -1341.379
+AIC(sarima.model.3)
+
+# Check Goodness of Fit by checking the correlogram of the residuals 
+# you must check the acf of the residuals 
+acf(resid(sarima.model),
+    main="ACF of residuals")
+```
+
+`r figs("ACF.Residuals.Sarima","ACF of Residuals of SARIMA Model")`
+
+We check the goodness of fit of our SARIMA model by checking if the correlogram of the residuals resembles white noise. 
+
+### Checking the Correlogram of the squared residuals to investigate volatility 
+
+```{r, echo = FALSE}
+
+acf(resid(sarima.model)^2)
+
+```
+
+`r figs("ACF.Residuals.Sarima.Squared","Correlogram of Squared Residuals of SARIMA Model")`
+
+There seems to be volatility since the squared resiauls are correlated at some lags. We will try fitting a GARCH model to the residual series next. 
+
+
+```{r, echo = FALSE}
+
+sarima.garch = garch(resid(sarima.model), trace = F)
+t(confint(sarima.garch)) %>% kable()
+
+```
+
+`r table_nums("Sarima.garch.CI","Estimate of Parameters for Garch Model of Residuals" )`
+
+
+```{r, echo = FALSE}
+sarima.garch.res = resid(sarima.garch)[-1]
+par(mfrow = c(1,2))
+acf(sarima.garch.res)
+acf(sarima.garch.res^2)
+```
+
+`r figs("Sarima.Garch.Squared","Correlogram of Residuals(left) of and Squared Residuals (right)")`
+
+The correlogram of the residuals resembles white noise. A satisfactory fit has been attained. 
+
+
+### GARCH in forecasts
+
+Since the GARCH model is fitted to the residual errors of a fitted time series model, it will not influence the average prediction at some point in time since the mean of the residual errors is zero. Thus, single-point forecasts from a fitted time series model remain unchanged when GARCH models are fitted to the residuals. 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all', warning=FALSE}
+sarima.with.garch = garchFit(formula = ~arma(1,1) + garch(1,1), data = hs.ts.train)
+summary(sarima.with.garch)
+
+
+f11 = predict(sarima.model, n.ahead = 12)
+rmse.f11 = sqrt(mean((test[,1] - exp(f11$pred))^2))
+rmse.f11  # 9.379658
+
+
+
+f11_2 = predict(sarima.model.2, n.ahead = 12)
+rmse.f11_2 = sqrt(mean((test[,1] - exp(f11_2$pred))^2))
+rmse.f11_2  # 9.010044
+
+
+f11_3 = predict(sarima.model.3, n.ahead = 12)
+rmse.f11_3 = sqrt(mean((test[,1] - exp(f11_3$pred))^2))
+rmse.f11_3  # 8.98704 
+
+
+
+
+forecast.arima=predict(sarima.model,n.ahead=12,se.fit = T)
+cil=exp(forecast.arima$pred-1.96*forecast.arima$se)
+ciu=exp(forecast.arima$pred+1.96*forecast.arima$se)
+ts.plot(cbind(train[,1],exp(forecast.arima$pred),cil,ciu),lty=c(1,2,3,3),
+        col=c("blue","green","red","red"),main="Forecasts of SARIMA(1,1,1)(2,1,2)12")
+
+
+```
+
+
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+get.best.arima <- function(x.ts, maxord = c(1,1,1,1,1,1))
+{
+  best.aic <- 1e8
+  n <- length(x.ts)
+  for (p in 0:maxord[1]) for (d in 0:maxord[2]) for (q in 0:maxord[3])
+    for (P in 0:maxord[4]) for (D in 0:maxord[5]) for (Q in 0:maxord[6])
+    {
+      fit <- arima(x.ts, order = c(p,d,q), 
+                   seas = list(order = c(P,D,Q), 
+                               frequency(x.ts)), method = "CSS")
+      fit.aic <- -2 * fit$loglik + (log(n) + 1) * length(fit$coef)
+      if (fit.aic < best.aic)
+      {
+        best.aic <- fit.aic 
+        best.fit <- fit
+        best.model <- c(p,d,q,P,D,Q)
+      }
+    }
+  list(best.aic, best.fit, best.model)
+}
+
+
+best.arima.elec <- get.best.arima(log.train.hs, maxord = c(2,2,2,2,2,2))
+
+best.fit.elec <- best.arima.elec[[2]]
+acf(resid(best.fit.elec))
+best.arima.elec[[3]]  # 2 1 0    2 0 2 
+
+#ts.plot(cbind(window(train)))
+```
+
+
+
+# Regression with autocorrelated errors 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+months.uw = cycle(transformed_train[,2])
+months.ur = cycle(transformed_train[,3])
+model.reg = lm(transformed_train[,1] ~ factor(months.uw) + cube_root.train.uw + log.train.ur)
+summary(model.reg)
+
+
+# Compare the fitted values(predicted values) in-sample with the actual data in-sample 
+plot(ts(fitted(model.reg), freq = 12, start = c(1959,1)), col = "red", ylab = "data and fitted values", type = "l", 
+     ylim = range(c(fitted(model.reg), transformed_train)))
+
+### Part F 
+# Diagnose further the model - Checking the residuals, assessing normality of the residuals 
+par(mfrow = c(2,2))
+plot(y = rstudent(model.reg), x= as.vector(time(transformed_train)), xlab = "time", ylab = "Standardized Residuals", type = "l")
+abline(h = 0)
+acf(rstudent(model.reg))
+hist(rstudent(model.reg), xlab = "Standardized Residuals")
+qqnorm(rstudent(model.reg))
+
+```
+
+
+### Fitting a model to the residuals 
+```{r, echo = FALSE}
+# Fit a model to the residuals and check if it is good 
+# Because the residuals of model2 have some structure in them, we need to check the acf and pacf together to see what kind of model to fit. 
+
+## Question 7
+# Identify the model for the residuals. I thought an AR(1) model would be ok 
+
+par(mfrow = c(1,2))
+acf(ts(rstudent(model.reg)))
+pacf(ts(rstudent(model.reg)))
+```
+
+`r figs("ACF.PACF","ACF and PACF to Identify Model for Residuals")`
+
+Looking at the PACF on the right in `r figs("ACF.PACF",display = "cite")`, we see that the partial autocorrelations at lag 1 and lag 2 are significant which suggests an AR(2) process. 
+
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all', warning = FALSE}
+modelres1 = arima(ts(rstudent(model.reg)), order = c(2,0,0)) # Fit AR(2) to residuals 
+modelres1 
+par(mfrow = c(1,1))
+acf(modelres1$residuals)
+summary(modelres1)
+modelres1
+```
+
+`r figs("ACF.Residuals","ACF of Residuals Model")`
+
+
+Using gls to fit a first gls regression model that models residuals with the identified model. To incorporate the information on the correlation of the residuals via the model that we identified for them, we use nlme package and the gls(). Then we predict using the fitted model. 
+
+
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+gls.model = gls(transformed_train[,1] ~ factor(months.uw) + cube_root.train.uw + log.train.ur, correlation = corARMA(c(0.6667,0.2913), p = 2))
+gls.model
+
+
+acf(ts(residuals(gls.model, type = "normalized")))
+
+# # Forecast with the first gls model that incoporates the residual model 
+predicted.gls = predict(gls.model, cbind((uw.ts.test)^(1/3), log(ur.ts.test)), se.fit = T)
+predicted.gls.ts = ts(predicted.gls, start = c(2017,9), end = c(2018,8), frequency = 12)
+
+rmse.gls = sqrt(mean((test[,1] - exp(predicted.gls.ts) )^2))
+rmse.gls  # 29.56981
+  
+ts.plot(train[,1],exp(predicted.gls.ts), lty = 1:2, main = "Data and Forecast")
+
+```
+
+`r figs("Data.and.Forecast","Forecast with gls model incorporating residual model")`
+
+### Inluding now time trend 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+times = time(transformed_train[,1])
+glsmodel2 = gls(transformed_train[,1] ~ factor(months.uw) + times^2 + cube_root.train.uw + log.train.ur, correlation = corARMA(c(0.6667,0.2913), p = 2))
+glsmodel2
+
+plot(y = residuals(glsmodel2), x = as.vector(time(transformed_train[,1])), xlab = "time", type = "l")
+abline(h=0)
+acf(ts(residuals(glsmodel2)))
+
+predicted.gls2 = predict(glsmodel2, cbind((uw.ts.test)^(1/3), log(ur.ts.test)), se.fit = T)
+predicted.gls.ts2 = ts(predicted.gls2, start = c(2017,9), end = c(2018,8), frequency = 12)
+
+rmse.gls2 = sqrt(mean((test[,1] - exp(predicted.gls.ts2) )^2))
+rmse.gls2  # 45.23173
+  
+```
+
+
+# VAR model 
+
+```{r, echo = FALSE}
+ts.plot(transformed_train, lty = c(1,2,3), col = c("red","blue","green"), main = "Logged HS,UW,UR")
+legend("topright",c("HS", "UW", "UR"),lty = c(1,2,3), col = c("red","blue","green"))
+
+```
+
+`r figs("TimePlotOfThree","Time Plot of all Three Variables")`
+
+We now want to study the relationships between the variables and we do this by observing the ACFs and the CCFs of our transformed and seasonal of regular differenced data in `r figs("ACF_CCF.Transf.SRDiff",display = "cite" )`. 
+
+$hs_t$ depends on: 
+
+HS doesn't seem to depend on uw since there are no statistically significant cross correlations. HS doesn't seem to depend on ur either for the same reason stated before. 
+To determine the dependence of HS on past values of itself, we look at what happens in the cross correlation function after lag 2. The cross-correlations don't seem to die down in a damped exponential function nor in a damped since-wave fashion. Therefore, we cannot conclude that hs at time t depends on past values of itself. 
+
+
+
+$uw_t$ depends on:
+
+UW depends on $ur_{t-1}$ because of the statistically significant cross correlation at lag 1. There are no lags between the first spike and the spike at which decay starts (lag2) so UW only depends on ur lagged once. This can be observed in the [2,3] of figs("ACF_CCF.Transf.SRDiff",display = "cite" )`. 
+The first significant spike is at lag 2, so UW depends on $hs_{t-2}$. 
+To determine the dependence of uw on past values of itself, we look at what happens in the cross correlation functions, we look to see what happens after lag 2. The sample cross correlation seems to die in a damped sine fashion so uw at time t depends on $uw_{t-1}$ and $uw_{t-2}$. 
+
+$uw_t = hs_{t-2} + uw_{t-1} + uw_{t-2} + ur_{t-1}$
+
+
+$ur_t$ depends on: 
+
+Looking at the lower left cross correlation, we see the a spike at lag 1 and lag 2, so we can say that ur at time t depends on $hs_{t-1}$. There isn't any lags between the first significant spike and the one after which decay starts, so ur seems to depend only on $hs_{t-1}$. We can see the first significant spike at lag 2 so conclude that ur depends on $uw_{t-2}$.To determine the dependence of ur on past values of itself, we look at what happens in the cross correlation functions, we look to see what happens after lag 2. The cross correlations seem to dampen in a sine-wave fashion we ur at time t depnds on $ur_{t-1}$ and $ur_{t-2}$
+
+$ur_t = hs_{t-1} + uw_{t-2} + ur_{t-1} + ur_{t-2}$
+
+
+### Let's check if this relation is spurious 
+
+It is important to check the results of this relation with caution and question whether the causality is warranted or not. Time series, especially financial time series, can be approximated by a random walk model and although not related at all, appear very correlated among themselves because they have coincident "walks" (coincident stochastic trends). Even though the variables may not be related they appear to be spuriously related. 
+
+Non-random walk time series can also have spurious relations due to confounding factors such as population growth which would affect both. 
+
+Before doing vector autoregresion, we check for unit roots and check common stochastic trends(cointegration). 
+
+Referring to the unit root test result in `r table_nums("UnitRoot", display = "cite")`, we see that the three series are random walks; the p values of 0.2943, 0.119, 0.0935 are all larger than 0.05 so we fail to reject the null which states that the process if a random walk. 
+
+Additionally, referring to our cointegration test result in `r table_nums("CointegrationTest", display = "cite")`, we see that the three series are cointegrated; the p-value of 0.01 < 0.05 so we reject the null and conclude the three sries are cointegrated and there there is a true relation among them. 
+
+
+### Forecasting Variables with VAR model 
+
+```{r, echo=FALSE, results = 'hide', fig.keep='all'}
+VAR.model = VAR(transf.seas.of.diff, p = 3)
+coef(VAR.model)
+
+VAR.model_2 = VAR(transformed_train, p = 5)
+coef(VAR.model_2)
+
+var.aic <- VAR(transformed_train,type="none",lag.max=3,ic="AIC")
+summary(var.aic)
+
+adf.test(transf.seas.of.diff[,1])  
+
+po.test(transf.seas.of.diff)   # cointegrated 
+
+
+```
+
+
+### Residual plots of VAR model fitted 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+# 
+# par(mfrow = c(1,3))
+# acf(resid(VAR.model)[,1], main = "Res of VAR(3)")
+# acf(resid(VAR.model)[,2], main = "Res of VAR(3)")
+# acf(resid(VAR.model)[,3], main = "Res of VAR(3)")
+# 
+# par(mfrow = c(1,3))
+# acf(resid(VAR.model_2)[,1], main = "Res of VAR(2)")
+# acf(resid(VAR.model_2)[,2], main = "Res of VAR(2)")
+# acf(resid(VAR.model_2)[,3], main = "Res of VAR(2)")
+
+acf(resid(VAR.model_2))
+```
+
+`r figs("ACF.of.Res.VAR","Residual Plots of VAR(2) Model")`
+
+We must check and verify if the acf of residuals are mulitvariate white noise and indeed they resemble white noise. 
+
+
+### Forecasting with VAR(3) Model 
+```{r, echo = FALSE, results = 'hide', fig.keep='all', warning = FALSE}
+VAR.pred = predict(VAR.model, n.ahead = 12)
+VAR.pred
+hs.predict = ts(VAR.pred$fcst$log.train.hs[,1], st = c(2017,9), fr = 12)
+uw.predict = ts(VAR.pred$fcst$cube_root.train.uw[,1], st = c(2017,9), fr = 12)
+ur.predict = ts(VAR.pred$fcst$log.train.ur[,1], st = c(2017,9), fr = 12)
+
+rmse.VAR_3 = sqrt(mean((hs.ts.test - exp(hs.predict))^2))
+rmse.VAR_3  
+
+
+######## 
+
+VAR.pred_2 = predict(VAR.model_2, n.ahead = 12)
+VAR.pred_2
+hs.predict_2 = ts(VAR.pred_2$fcst$log.train.hs[,1], st = c(2017,9), fr = 12)
+uw.predict_2 = ts(VAR.pred_2$fcst$cube_root.train.uw[,1], st = c(2017,9), fr = 12)
+ur.predict_2 = ts(VAR.pred_2$fcst$log.train.ur[,1], st = c(2017,9), fr = 12)
+
+rmse.VAR_2 = sqrt(mean((hs.ts.test - exp(hs.predict_2))^2))
+rmse.VAR_2  # 10.88952 VAR(2)      # 10.68861  VAR(3)
+
+par(mfrow = c(2,2))
+ts.plot(cbind(window(transformed_train[,1], start = c(1959,1) ), hs.predict_2), lty = 1:2, col = c("black", "red"), main = "Forecast of hs (red line)")
+ts.plot(cbind(window(transformed_train[,2], start = c(1959,1) ), uw.predict_2), lty = 1:2, col = c("black", "red"), main = "Forecast of uw (red line)")
+ts.plot(cbind(window(transformed_train[,3], start = c(1959,1) ), ur.predict_2), lty = 1:2, col = c("black", "red"), main = "Forecast of ur (red line)")
+
+```
+
+`r figs("VAR.Forecasts","Forecasts with VAR")`
+
+
+### Impulse Response Functions 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+
+## Do impulse response analysis of a shock to hs.  
+irf.ihs=irf(VAR.model_2, impulse = "log.train.hs", response = c("log.train.hs","cube_root.train.uw","log.train.ur"),
+           boot = FALSE,n.ahead=50)
+plot(irf.ihs)
+
+```
+
+`r figs("IRhs","Impulse Response- Shock to hs")`
+
+A shock to hs causes hs to decrease, uw as well as ur decreases as well. HS keeps the same downward trend and uw and ur increase for a bit but then decreases afain. HS increases slightly and then converges. 
+
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+## Make sense of things, do not just write detail by detail the plots, interpret what is going on. 
+
+irf.iuw=irf(VAR.model_2, impulse = "cube_root.train.uw",  response = c("log.train.hs","cube_root.train.uw","log.train.ur"),
+            boot = FALSE,n.ahead=50)
+plot(irf.iuw)
+
+```
+
+`r figs("IRuw","Impulse Response- Shock to uw")`
+
+A shock to uw causes it to decrease and so ur has a sharp decline while hs has a sharp increase. Then uw has a slight increase and hs is decreasing while ur is increasing. They all eventually converge, howver the ur is at a slighter higher level than its equilibrium level. 
+
+```{r, echo = FALSE, results = 'hide', fig.keep='all'}
+
+irf.iur=irf(VAR.model_2, impulse = "log.train.ur", response = c("log.train.hs","cube_root.train.uw","log.train.ur"),
+           boot = FALSE,n.ahead=50)
+plot(irf.iur)
+
+```
+
+
+`r figs("IRur","Impulse Response- Shock to ur")`
+
+A shock to ur causes it to increase very slightly, uw increases slightly and hw declines. UR decreases while hw increases. 
+
+In all these Impulse Responses, we see the same pattern. UW and UR move the same direction which would make sense while HS moves in the opposite direction which makes sense in terms of economics. Housing starts seems to be a leading variable while the unemployment rates seem to be lagging.  
+
+
+# Forecasts and Conclusions 
+
+```{r, echo = FALSE, fig.keep='all'}
+Time.Forecasted = c("Sept 1,2017","Oct 1,2017", "Nov 1,2017", "Dec 1,2017", "Jan 1,2018", "Feb 1,2018", "Mar 1,2018", "Apr 1,2018", "May 1,2018", "Jun 1,2018", "Jul 1,2018", "Aug 1,2018")
+SARIMA111212 <- exp(f11$pred)
+Regression <- exp(predicted.gls.ts)
+VAR <- exp(hs.predict_2)
+aaa <- cbind(Time.Forecasted, SARIMA111212, Regression, VAR)
+aaa <- as.data.frame(aaa, stringsAsFactors = FALSE)
+aaa$SARIMA111212 <- as.numeric(aaa$SARIMA111212)
+aaa$Regression <- as.numeric(aaa$Regression)
+aaa$VAR <- as.numeric(aaa$VAR)
+aaa <- mutate(aaa, Average = (c(aaa[,2] + aaa[,3] +aaa[,4])/3))
+Actual.data <- test[,1]
+RMSE <- c("RMSE", rmse.f11,rmse.gls, rmse.VAR_2 )
+aaafinal <- rbind(aaa,RMSE)
+aaafinal$SARIMA111212 <- as.numeric(aaafinal$SARIMA111212)
+aaafinal$Regression <- as.numeric(aaafinal$Regression)
+aaafinal$VAR <- as.numeric(aaafinal$VAR)
+aaafinal[13,5]  <- rowMeans(aaafinal[13,2:4])
+Actual.data <- as.numeric(append(Actual.data, ""))
+final.table <- cbind(aaafinal,Actual.data)
+final.table %>% kable()
+
+```
+
+`r table_nums("Forecast.RMSE","Forecast RMSE" )`
+
+
+The SARIMA (1,1,1)(2,1,2)12 model gave the lowest root mean square error of 9.379658 relative to the other models chosen which can be seen in `r table_nums("Forecast.RMSE",display = "cite" )`.There were different SARIMAs that I tried by using a function to find a SARIMA model with the lowest AIC. The lowest one corresponed to a SARIMA (2,1,0)(2,0,2). However, I used the SARIMA(1,1,1)(2,1,2)12 based on observing the ACF and PACF of my seasonal of regular differenced data after log transformation via boxcox. The RMSE of both were both around 9. 
+
+
+Additionally, GLS methodology was also utilized; I first ran a regression including with dummy variables, the transformed uw and transformed ur. I checked and verified to see if the assumptions of regression met. Then, I chose to fit AR(2) model, based on the examination of the ACF and PACF plots of the model's residuals, to the residuals because there were high autocorrelations in the residuals. I then used the gls function and ran a regression with dummy variables, transformed us and transformed ur taking into consideration the AR(2) model for the residuals. I attempted another model including one trying time component and another trying time component squared as well along with my other variables. The GLS model that I ended up choosing was the one with the seasonal component, transformed us and transformed ur along with including the AR(2) model for residuals. This gave me RMSE of 29.59 which was relatively higher than the RMSE of the other techniques I used. 
+
+
+Then I tried VAR model. I first checked for unit roos and checked for common stochastic trends by a cointegration test. The tests show the process and random walks and that the three series are cointegrated. Then I analyzed the autocorrelation and cross correlation plots of the three time series and saw the effects each had on each other. The VAR(3) model with a RMSE of 10.68861 also performed almost as well at my SARIMA (1,1,1)(2,1,2)12 model. The time series were proven to be cointegrated with the cointegration test in table_nums("CointegrationTest", display = "cite")` so we could  say that the series are related to each other and conclude causality. Based on my conclusion from the Impulse Responses as well, the economist's thoughts of assuming housing starts as a leading variable seem probable and reliable. In other words, this isn't just a spurious relation.    
+
+
+
+
+
